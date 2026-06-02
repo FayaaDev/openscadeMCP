@@ -635,13 +635,13 @@ def generate_multi_view_images(prompt: str, num_views: int = 4) -> Dict[str, Any
 
 # Add image approval tool
 @register_tool
-def approve_image(multi_view_id: str, view_id: str) -> Dict[str, Any]:
+def approve_image(multi_view_id: str, view_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Approve an image for 3D model generation.
     
     Args:
         multi_view_id: ID of the multi-view set
-        view_id: ID of the view to approve
+        view_id: ID of the view to approve. If omitted, all views are approved.
         
     Returns:
         Dictionary with approval information
@@ -652,7 +652,27 @@ def approve_image(multi_view_id: str, view_id: str) -> Dict[str, Any]:
     
     # Get multi-view information
     multi_view_info = approved_images[multi_view_id]
-    
+
+    if view_id is None:
+        for view in multi_view_info["views"]:
+            current_view_id = view["view_id"]
+            if current_view_id in multi_view_info["rejected_views"]:
+                multi_view_info["rejected_views"].remove(current_view_id)
+            if current_view_id not in multi_view_info["approved_views"]:
+                multi_view_info["approved_views"].append(current_view_id)
+
+        if len(multi_view_info["approved_views"]) >= IMAGE_APPROVAL["MIN_APPROVED_IMAGES"]:
+            multi_view_info["approval_complete"] = True
+
+        return {
+            "multi_view_id": multi_view_id,
+            "view_id": None,
+            "status": "approved_all",
+            "approved_views": multi_view_info["approved_views"],
+            "rejected_views": multi_view_info["rejected_views"],
+            "approval_complete": multi_view_info["approval_complete"]
+        }
+     
     # Check if view ID exists
     view_exists = False
     for view in multi_view_info["views"]:
