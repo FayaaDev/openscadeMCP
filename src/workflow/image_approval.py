@@ -9,6 +9,15 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _build_image_url(image_path: str) -> str:
+    output_root = os.path.abspath("output")
+    absolute_path = os.path.abspath(image_path)
+    if absolute_path.startswith(output_root + os.sep):
+        relative_path = os.path.relpath(absolute_path, output_root)
+        return f"/output/{relative_path.replace(os.sep, '/')}"
+    return absolute_path
+
 class ImageApprovalTool:
     """
     Tool for image approval/denial in MCP clients.
@@ -45,7 +54,7 @@ class ImageApprovalTool:
         return {
             "approval_id": approval_id,
             "image_path": image_path,
-            "image_url": f"/images/{os.path.basename(image_path)}",
+            "image_url": _build_image_url(image_path),
             "metadata": metadata or {}
         }
     
@@ -63,7 +72,8 @@ class ImageApprovalTool:
         """
         if approved:
             # Copy approved image to output directory
-            approved_path = os.path.join(self.output_dir, os.path.basename(image_path))
+            original_name = os.path.basename(image_path)
+            approved_path = os.path.join(self.output_dir, f"{approval_id}_{original_name}")
             os.makedirs(os.path.dirname(approved_path), exist_ok=True)
             shutil.copy2(image_path, approved_path)
             

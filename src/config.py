@@ -1,5 +1,4 @@
 import os
-from typing import Dict, Any
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -19,7 +18,7 @@ SCAD_DIR = os.path.join(BASE_DIR, "scad")
 # Google Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # Set via environment variable
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-GEMINI_MODEL = "gemini-2.0-flash-exp-image-generation"  # Default model for image generation
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-image")
 
 # CUDA Multi-View Stereo configuration (local)
 CUDA_MVS_PATH = os.getenv("CUDA_MVS_PATH", os.path.join(BASE_DIR, "cuda-mvs"))
@@ -65,11 +64,6 @@ REMOTE_CUDA_MVS = {
     "APPROVED_IMAGES_DIR": APPROVED_IMAGES_DIR,
 }
 
-# Venice.ai API configuration (optional)
-VENICE_API_KEY = os.getenv("VENICE_API_KEY", "")  # Set via environment variable
-VENICE_BASE_URL = "https://api.venice.ai/api/v1"
-VENICE_MODEL = "fluently-xl"  # Default model for fastest image generation (2.30s)
-
 # Image approval configuration
 IMAGE_APPROVAL = {
     "ENABLED": os.getenv("IMAGE_APPROVAL_ENABLED", "True").lower() == "true",
@@ -105,15 +99,6 @@ NLP = {
     
     User request: {user_request}
     """,
-}
-
-# Deprecated configurations (moved to old folder)
-# These are kept for reference but not used in the new workflow
-DEPRECATED = {
-    "SAM2_CHECKPOINT_PATH": os.getenv("SAM2_CHECKPOINT_PATH", os.path.join(BASE_DIR, "models", "sam2_vit_b.pth")),
-    "SAM2_MODEL_TYPE": os.getenv("SAM2_MODEL_TYPE", "vit_b"),
-    "SAM2_USE_GPU": os.getenv("SAM2_USE_GPU", "False").lower() == "true",
-    "THREESTUDIO_PATH": os.path.join(BASE_DIR, "threestudio")
 }
 
 # Create necessary directories

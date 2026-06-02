@@ -1,15 +1,18 @@
 import os
 import logging
+import sys
 import uuid
-import json
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
-from mcp import MCPServer, MCPTool, MCPToolCall, MCPToolCallResult
+from mcp.server.mcpserver.server import MCPServer
+
+if __package__ in {None, ""}:
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import configuration
 from src.config import *
@@ -19,10 +22,10 @@ from src.nlp.parameter_extractor import ParameterExtractor
 from src.models.code_generator import CodeGenerator
 from src.openscad_wrapper.wrapper import OpenSCADWrapper
 from src.utils.cad_exporter import CADExporter
-from src.visualization.headless_renderer import HeadlessRenderer
-from src.printer_discovery.printer_discovery import PrinterDiscovery, PrinterInterface
-from src.ai.venice_api import VeniceImageGenerator
-from src.ai.sam_segmentation import SAMSegmenter
+from src.ai.gemini_api import GeminiImageGenerator
+from src.models.cuda_mvs import CUDAMultiViewStereo
+from src.remote.connection_manager import CUDAMVSConnectionManager
+from src.workflow.image_approval import ImageApprovalTool
 
 # Configure logging
 logging.basicConfig(
@@ -43,81 +46,194 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create directories
-os.makedirs("scad", exist_ok=True)
-os.makedirs("output", exist_ok=True)
-os.makedirs("output/models", exist_ok=True)
-os.makedirs("output/preview", exist_ok=True)
-os.makedirs("templates", exist_ok=True)
-os.makedirs("static", exist_ok=True)
-
 # Initialize components
 parameter_extractor = ParameterExtractor()
 code_generator = CodeGenerator("scad", "output")
 openscad_wrapper = OpenSCADWrapper("scad", "output")
 cad_exporter = CADExporter()
-headless_renderer = HeadlessRenderer()
-printer_discovery = PrinterDiscovery()
+
+
+def initialize_local_cuda_mvs() -> Optional[CUDAMultiViewStereo]:
+    if not os.path.exists(CUDA_MVS_PATH):
+        logger.warning("Local CUDA MVS not available at %s; local reconstruction disabled", CUDA_MVS_PATH)
+        return None
+
+    try:
+        return CUDAMultiViewStereo(CUDA_MVS_PATH, MODELS_DIR)
+    except Exception as exc:
+        logger.warning("Failed to initialize local CUDA MVS: %s", exc)
+        return None
+
+
+def initialize_remote_cuda_mvs() -> Optional[CUDAMVSConnectionManager]:
+    if not REMOTE_CUDA_MVS["ENABLED"]:
+        return None
+
+    try:
+        manager = CUDAMVSConnectionManager(
+            api_key=REMOTE_CUDA_MVS["API_KEY"] or None,
+            discovery_port=REMOTE_CUDA_MVS["DISCOVERY_PORT"],
+            connection_timeout=REMOTE_CUDA_MVS["CONNECTION_TIMEOUT"],
+            health_check_interval=REMOTE_CUDA_MVS["HEALTH_CHECK_INTERVAL"],
+            auto_discover=REMOTE_CUDA_MVS["USE_LAN_DISCOVERY"],
+        )
+
+        if REMOTE_CUDA_MVS["SERVER_URL"]:
+            manager.add_server(
+                {
+                    "server_id": "configured-server",
+                    "name": "Configured CUDA MVS Server",
+                    "url": REMOTE_CUDA_MVS["SERVER_URL"],
+                    "status": "available",
+                }
+            )
+
+        return manager
+    except Exception as exc:
+        logger.warning("Failed to initialize remote CUDA MVS: %s", exc)
+        return None
 
 # Initialize AI components
-venice_generator = VeniceImageGenerator(VENICE_API_KEY, IMAGES_DIR)
 gemini_generator = GeminiImageGenerator(GEMINI_API_KEY, IMAGES_DIR)
-cuda_mvs = CUDAMultiViewStereo(CUDA_MVS_PATH, MODELS_DIR, use_gpu=CUDA_MVS_USE_GPU)
+cuda_mvs = initialize_local_cuda_mvs()
 image_approval = ImageApprovalTool(APPROVED_IMAGES_DIR)
 
 # Initialize remote processing components if enabled
-remote_connection_manager = None
-if REMOTE_CUDA_MVS["ENABLED"]:
-    logger.info("Initializing remote CUDA MVS connection manager")
-    remote_connection_manager = CUDAMVSConnectionManager(
-        api_key=REMOTE_CUDA_MVS["API_KEY"],
-        discovery_port=REMOTE_CUDA_MVS["DISCOVERY_PORT"],
-        use_lan_discovery=REMOTE_CUDA_MVS["USE_LAN_DISCOVERY"],
-        server_url=REMOTE_CUDA_MVS["SERVER_URL"] if REMOTE_CUDA_MVS["SERVER_URL"] else None
-    )
-
-# Initialize workflow pipeline
-multi_view_pipeline = MultiViewToModelPipeline(
-    gemini_generator=gemini_generator,
-    cuda_mvs=cuda_mvs,
-    approval_tool=image_approval,
-    output_dir=OUTPUT_DIR
-)
-
-# SAM2 segmenter will be initialized on first use to avoid loading the model unnecessarily
-sam_segmenter = None
-
-def get_sam_segmenter():
-    """
-    Get or initialize the SAM2 segmenter.
-    
-    Returns:
-        SAMSegmenter instance
-    """
-    global sam_segmenter
-    if sam_segmenter is None:
-        logger.info("Initializing SAM2 segmenter")
-        sam_segmenter = SAMSegmenter(
-            model_type=SAM2_MODEL_TYPE,
-            checkpoint_path=SAM2_CHECKPOINT_PATH,
-            use_gpu=SAM2_USE_GPU,
-            output_dir=MASKS_DIR
-        )
-    return sam_segmenter
+remote_connection_manager = initialize_remote_cuda_mvs()
 
 # Store models in memory
 models = {}
-printers = {}
 approved_images = {}
 remote_jobs = {}
 
 # Create MCP server
-mcp_server = MCPServer()
+mcp_server = MCPServer(name="openscad-mcp-server")
+tool_registry: Dict[str, Any] = {}
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+def register_tool(fn):
+    mcp_server.tool()(fn)
+    tool_registry[fn.__name__] = fn
+    return fn
+
+
+def require_local_cuda_mvs() -> CUDAMultiViewStereo:
+    if not cuda_mvs:
+        raise ValueError("Local CUDA MVS is not available on this machine")
+    return cuda_mvs
+
+
+def require_remote_cuda_mvs() -> CUDAMVSConnectionManager:
+    if not REMOTE_CUDA_MVS["ENABLED"]:
+        raise ValueError("Remote CUDA MVS processing is not enabled")
+    if not remote_connection_manager:
+        raise ValueError("Remote CUDA MVS connection manager is not initialized")
+    return remote_connection_manager
+
+
+def discover_remote_servers() -> List[Dict[str, Any]]:
+    manager = require_remote_cuda_mvs()
+
+    # Prefer already configured servers (for example a cloud-hosted endpoint)
+    # before falling back to LAN discovery.
+    known_servers = manager.get_servers()
+    if known_servers:
+        manager.check_all_servers()
+        return manager.get_servers()
+
+    return manager.discover_servers()
+
+
+def get_job_status(job_id: str) -> Dict[str, Any]:
+    manager = require_remote_cuda_mvs()
+    if job_id not in remote_jobs:
+        raise ValueError(f"Job with ID {job_id} not found")
+
+    job_info = remote_jobs[job_id]
+    status = manager.get_job_status(job_id, job_info["server_id"])
+    if status.get("status") == "success" and "job_info" in status:
+        job_state = status["job_info"]
+        job_info["status"] = job_state.get("status", job_info.get("status", "unknown"))
+        job_info["progress"] = job_state.get("progress", 0)
+        job_info["message"] = job_state.get("message", "")
+    return job_info
+
+
+def download_remote_model(job_id: str) -> Dict[str, Any]:
+    manager = require_remote_cuda_mvs()
+    if job_id not in remote_jobs:
+        raise ValueError(f"Job with ID {job_id} not found")
+
+    job_info = remote_jobs[job_id]
+    result = manager.download_model(job_id, job_info["server_id"], REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"])
+    if result.get("status") != "success":
+        raise ValueError(result.get("message", "Failed to download remote model"))
+
+    return {
+        "model_path": result.get("local_path"),
+        "point_cloud_path": None,
+        "format": result.get("format"),
+    }
+
+
+def cancel_job(job_id: str) -> Dict[str, Any]:
+    manager = require_remote_cuda_mvs()
+    if job_id not in remote_jobs:
+        raise ValueError(f"Job with ID {job_id} not found")
+
+    job_info = remote_jobs[job_id]
+    result = manager.cancel_job(job_id, job_info["server_id"])
+    return {"cancelled": result.get("status") == "success", "message": result.get("message", "")}
+
+
+def build_local_model_from_images(image_paths: List[str], output_name: str) -> Dict[str, Optional[str]]:
+    local_cuda_mvs = require_local_cuda_mvs()
+    result = local_cuda_mvs.generate_model_from_images(image_paths=image_paths, output_name=output_name)
+    point_cloud_path = result.get("point_cloud_file")
+    model_path = point_cloud_path
+
+    if point_cloud_path and REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"] == "obj":
+        model_path = local_cuda_mvs.convert_ply_to_obj(point_cloud_path)
+
+    return {
+        "model_path": model_path,
+        "point_cloud_path": point_cloud_path,
+    }
+
+
+def build_output_url(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+
+    relative_path = os.path.relpath(path, OUTPUT_DIR)
+    return f"/output/{relative_path.replace(os.sep, '/')}"
+
+
+def create_import_scad(model_path: str, model_id: str) -> Dict[str, Any]:
+    scad_code = f"""// Generated OpenSCAD import for model {model_id}
+scale_factor = 1.0;
+position_x = 0;
+position_y = 0;
+position_z = 0;
+rotation_x = 0;
+rotation_y = 0;
+rotation_z = 0;
+
+translate([position_x, position_y, position_z])
+rotate([rotation_x, rotation_y, rotation_z])
+scale(scale_factor)
+import(\"{model_path}\");
+"""
+
+    scad_file = openscad_wrapper.generate_scad(scad_code, model_id)
+    previews = openscad_wrapper.generate_multi_angle_previews(scad_file)
+    return {"scad_file": scad_file, "previews": previews}
+
+# Mount output files used by generated images and previews.
+app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 # Create Jinja2 templates
+os.makedirs("templates", exist_ok=True)
 templates = Jinja2Templates(directory="templates")
 
 # Create model preview template
@@ -245,7 +361,7 @@ with open("templates/preview.html", "w") as f:
     """)
 
 # Define MCP tools
-@mcp_server.tool
+@register_tool
 def create_3d_model(description: str) -> Dict[str, Any]:
     """
     Create a 3D model from a natural language description.
@@ -305,7 +421,7 @@ def create_3d_model(description: str) -> Dict[str, Any]:
     
     return response
 
-@mcp_server.tool
+@register_tool
 def modify_3d_model(model_id: str, modifications: str) -> Dict[str, Any]:
     """
     Modify an existing 3D model.
@@ -374,7 +490,7 @@ def modify_3d_model(model_id: str, modifications: str) -> Dict[str, Any]:
     
     return response
 
-@mcp_server.tool
+@register_tool
 def export_model(model_id: str, format: str = "csg") -> Dict[str, Any]:
     """
     Export a 3D model to a specific format.
@@ -426,274 +542,8 @@ def export_model(model_id: str, format: str = "csg") -> Dict[str, Any]:
     
     return response
 
-@mcp_server.tool
-def discover_printers() -> Dict[str, Any]:
-    """
-    Discover 3D printers on the network.
-    
-    Returns:
-        Dictionary with discovered printers
-    """
-    # Discover printers
-    discovered_printers = printer_discovery.discover_printers()
-    
-    # Store printers
-    for printer in discovered_printers:
-        printers[printer["id"]] = printer
-    
-    # Create response
-    response = {
-        "printers": discovered_printers
-    }
-    
-    return response
-
-@mcp_server.tool
-def connect_to_printer(printer_id: str) -> Dict[str, Any]:
-    """
-    Connect to a 3D printer.
-    
-    Args:
-        printer_id: ID of the printer to connect to
-        
-    Returns:
-        Dictionary with connection information
-    """
-    # Check if printer exists
-    if printer_id not in printers:
-        raise ValueError(f"Printer with ID {printer_id} not found")
-    
-    # Get printer information
-    printer_info = printers[printer_id]
-    
-    # Connect to printer
-    printer_interface = PrinterInterface(printer_info)
-    success, error = printer_interface.connect()
-    
-    if not success:
-        raise ValueError(f"Failed to connect to printer: {error}")
-    
-    # Update printer information
-    printers[printer_id]["connected"] = True
-    printers[printer_id]["interface"] = printer_interface
-    
-    # Create response
-    response = {
-        "printer_id": printer_id,
-        "connected": True,
-        "printer_info": printer_info
-    }
-    
-    return response
-
-@mcp_server.tool
-def print_model(model_id: str, printer_id: str) -> Dict[str, Any]:
-    """
-    Print a 3D model on a connected printer.
-    
-    Args:
-        model_id: ID of the model to print
-        printer_id: ID of the printer to print on
-        
-    Returns:
-        Dictionary with print job information
-    """
-    # Check if model exists
-    if model_id not in models:
-        raise ValueError(f"Model with ID {model_id} not found")
-    
-    # Check if printer exists
-    if printer_id not in printers:
-        raise ValueError(f"Printer with ID {printer_id} not found")
-    
-    # Check if printer is connected
-    if not printers[printer_id].get("connected", False):
-        raise ValueError(f"Printer with ID {printer_id} is not connected")
-    
-    # Get model and printer information
-    model_info = models[model_id]
-    printer_info = printers[printer_id]
-    
-    # Check if model has been exported to a printable format
-    if not model_info.get("model_file"):
-        raise ValueError(f"Model with ID {model_id} has not been exported")
-    
-    # Print model
-    printer_interface = printer_info["interface"]
-    job_id, error = printer_interface.print_model(model_info["model_file"])
-    
-    if not job_id:
-        raise ValueError(f"Failed to print model: {error}")
-    
-    # Create response
-    response = {
-        "model_id": model_id,
-        "printer_id": printer_id,
-        "job_id": job_id,
-        "status": "printing"
-    }
-    
-    return response
-
-@mcp_server.tool
-def get_printer_status(printer_id: str) -> Dict[str, Any]:
-    """
-    Get the status of a printer.
-    
-    Args:
-        printer_id: ID of the printer to get status for
-        
-    Returns:
-        Dictionary with printer status
-    """
-    # Check if printer exists
-    if printer_id not in printers:
-        raise ValueError(f"Printer with ID {printer_id} not found")
-    
-    # Check if printer is connected
-    if not printers[printer_id].get("connected", False):
-        raise ValueError(f"Printer with ID {printer_id} is not connected")
-    
-    # Get printer information
-    printer_info = printers[printer_id]
-    
-    # Get printer status
-    printer_interface = printer_info["interface"]
-    status = printer_interface.get_status()
-    
-    # Create response
-    response = {
-        "printer_id": printer_id,
-        "status": status
-    }
-    
-    return response
-
-@mcp_server.tool
-def cancel_print_job(printer_id: str, job_id: str) -> Dict[str, Any]:
-    """
-    Cancel a print job.
-    
-    Args:
-        printer_id: ID of the printer
-        job_id: ID of the print job to cancel
-        
-    Returns:
-        Dictionary with cancellation information
-    """
-    # Check if printer exists
-    if printer_id not in printers:
-        raise ValueError(f"Printer with ID {printer_id} not found")
-    
-    # Check if printer is connected
-    if not printers[printer_id].get("connected", False):
-        raise ValueError(f"Printer with ID {printer_id} is not connected")
-    
-    # Get printer information
-    printer_info = printers[printer_id]
-    
-    # Cancel print job
-    printer_interface = printer_info["interface"]
-    success, error = printer_interface.cancel_job(job_id)
-    
-    if not success:
-        raise ValueError(f"Failed to cancel print job: {error}")
-    
-    # Create response
-    response = {
-        "printer_id": printer_id,
-        "job_id": job_id,
-        "status": "cancelled"
-    }
-    
-    return response
-
-# Add Venice.ai image generation tool
-@mcp_server.tool
-def generate_image(prompt: str, model: str = "fluently-xl") -> Dict[str, Any]:
-    """
-    Generate an image using Venice.ai's image generation models.
-    
-    Args:
-        prompt: Text description for image generation
-        model: Model to use (default: fluently-xl). Options include:
-            - "fluently-xl" (fastest, 2.30s): Quick generation with good quality
-            - "flux-dev" (high quality): Detailed, premium image quality
-            - "flux-dev-uncensored": Uncensored version of flux-dev model
-            - "stable-diffusion-3.5": Standard stable diffusion model
-            - "pony-realism": Specialized for realistic outputs
-            - "lustify-sdxl": Artistic stylization model
-            
-            You can also use natural language like:
-            - "fastest model", "quick generation", "efficient"
-            - "high quality", "detailed", "premium quality"
-            - "realistic", "photorealistic"
-            - "artistic", "stylized", "creative"
-        
-    Returns:
-        Dictionary with image information
-    """
-    # Generate a unique image ID
-    image_id = str(uuid.uuid4())
-    
-    # Generate image
-    result = venice_generator.generate_image(prompt, model)
-    
-    # Create response
-    response = {
-        "image_id": image_id,
-        "prompt": prompt,
-        "model": model,
-        "image_path": result.get("local_path"),
-        "image_url": result.get("image_url")
-    }
-    
-    return response
-
-# Add SAM2 segmentation tool
-@mcp_server.tool
-def segment_image(image_path: str, points: Optional[List[Tuple[int, int]]] = None) -> Dict[str, Any]:
-    """
-    Segment objects in an image using SAM2 (Segment Anything Model 2).
-    
-    Args:
-        image_path: Path to the input image
-        points: Optional list of (x, y) points to guide segmentation
-               If not provided, automatic segmentation will be used
-        
-    Returns:
-        Dictionary with segmentation masks and metadata
-    """
-    # Get or initialize SAM2 segmenter
-    sam_segmenter = get_sam_segmenter()
-    
-    # Generate a unique segmentation ID
-    segmentation_id = str(uuid.uuid4())
-    
-    try:
-        # Perform segmentation
-        if points:
-            result = sam_segmenter.segment_image(image_path, points)
-        else:
-            result = sam_segmenter.segment_with_auto_points(image_path)
-        
-        # Create response
-        response = {
-            "segmentation_id": segmentation_id,
-            "image_path": image_path,
-            "mask_paths": result.get("mask_paths", []),
-            "num_masks": result.get("num_masks", 0),
-            "points_used": points if points else result.get("points", [])
-        }
-        
-        return response
-    except Exception as e:
-        logger.error(f"Error segmenting image: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error segmenting image: {str(e)}")
-
-
 # Add Google Gemini image generation tool
-@mcp_server.tool
+@register_tool
 def generate_image_gemini(prompt: str, model: str = GEMINI_MODEL) -> Dict[str, Any]:
     """
     Generate an image using Google Gemini's image generation models.
@@ -717,14 +567,14 @@ def generate_image_gemini(prompt: str, model: str = GEMINI_MODEL) -> Dict[str, A
         "prompt": prompt,
         "model": model,
         "image_path": result.get("local_path"),
-        "image_url": f"/images/{os.path.basename(result.get('local_path', ''))}"
+        "image_url": build_output_url(result.get("local_path")),
     }
     
     return response
 
 
 # Add multi-view image generation tool
-@mcp_server.tool
+@register_tool
 def generate_multi_view_images(prompt: str, num_views: int = 4) -> Dict[str, Any]:
     """
     Generate multiple views of the same 3D object using Google Gemini.
@@ -747,7 +597,8 @@ def generate_multi_view_images(prompt: str, num_views: int = 4) -> Dict[str, Any
     multi_view_id = str(uuid.uuid4())
     
     # Generate multi-view images
-    results = gemini_generator.generate_multiple_views(prompt, num_views)
+    output_dir = os.path.join(MULTI_VIEW_DIR, multi_view_id)
+    results = gemini_generator.generate_multiple_views(prompt, num_views, output_dir=output_dir)
     
     # Create response
     response = {
@@ -760,7 +611,7 @@ def generate_multi_view_images(prompt: str, num_views: int = 4) -> Dict[str, Any
                 "view_index": result.get("view_index", i+1),
                 "view_direction": result.get("view_direction", ""),
                 "image_path": result.get("local_path"),
-                "image_url": f"/images/{os.path.basename(result.get('local_path', ''))}"
+                "image_url": build_output_url(result.get("local_path")),
             }
             for i, result in enumerate(results)
         ],
@@ -783,7 +634,7 @@ def generate_multi_view_images(prompt: str, num_views: int = 4) -> Dict[str, Any
 
 
 # Add image approval tool
-@mcp_server.tool
+@register_tool
 def approve_image(multi_view_id: str, view_id: str) -> Dict[str, Any]:
     """
     Approve an image for 3D model generation.
@@ -848,7 +699,7 @@ def approve_image(multi_view_id: str, view_id: str) -> Dict[str, Any]:
 
 
 # Add image rejection tool
-@mcp_server.tool
+@register_tool
 def reject_image(multi_view_id: str, view_id: str) -> Dict[str, Any]:
     """
     Reject an image for 3D model generation.
@@ -915,7 +766,7 @@ def reject_image(multi_view_id: str, view_id: str) -> Dict[str, Any]:
 
 
 # Add 3D model generation from approved images tool
-@mcp_server.tool
+@register_tool
 def create_3d_model_from_images(multi_view_id: str, output_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Create a 3D model from approved multi-view images.
@@ -957,131 +808,75 @@ def create_3d_model_from_images(multi_view_id: str, output_name: Optional[str] =
     
     # Create 3D model
     if REMOTE_CUDA_MVS["ENABLED"] and remote_connection_manager:
-        # Use remote CUDA MVS processing
         servers = discover_remote_servers()
-        
         if not servers:
             raise ValueError("No remote CUDA MVS servers found")
-        
-        # Use the first available server
-        server_id = servers[0]["id"]
-        
-        # Upload images
-        upload_result = upload_images_to_server(server_id, approved_image_paths)
-        
-        if not upload_result or "job_id" not in upload_result:
-            raise ValueError("Failed to upload images to remote server")
-        
-        job_id = upload_result["job_id"]
-        
-        # Process images
-        process_result = process_images_remotely(
-            server_id,
-            job_id,
-            {
-                "quality": REMOTE_CUDA_MVS["DEFAULT_RECONSTRUCTION_QUALITY"],
-                "output_format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
-            }
+
+        server_id = servers[0].get("server_id") or servers[0].get("id")
+        manager = require_remote_cuda_mvs()
+        remote_result = manager.generate_model_from_images(
+            image_paths=approved_image_paths,
+            output_format=REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"],
+            wait_for_completion=REMOTE_CUDA_MVS["WAIT_FOR_COMPLETION"],
+            poll_interval=REMOTE_CUDA_MVS["POLL_INTERVAL"],
+            server_id=server_id,
         )
-        
-        if not process_result:
-            raise ValueError(f"Failed to process images for job {job_id}")
-        
-        # Wait for completion if requested
-        if REMOTE_CUDA_MVS["WAIT_FOR_COMPLETION"]:
-            import time
-            
-            while True:
-                status = get_job_status(job_id)
-                
-                if not status:
-                    raise ValueError(f"Failed to get status for job {job_id}")
-                
-                if status["status"] in ["completed", "failed", "cancelled"]:
-                    break
-                
-                time.sleep(REMOTE_CUDA_MVS["POLL_INTERVAL"])
-            
-            if status["status"] == "completed":
-                # Download model
-                download_result = download_remote_model(job_id)
-                
-                if not download_result:
-                    raise ValueError(f"Failed to download model for job {job_id}")
-                
-                # Store model information
-                models[model_id] = {
-                    "id": model_id,
-                    "type": "cuda_mvs_remote",
-                    "parameters": {
-                        "multi_view_id": multi_view_id,
-                        "prompt": multi_view_info["prompt"],
-                        "num_views": len(approved_image_paths),
-                        "quality": REMOTE_CUDA_MVS["DEFAULT_RECONSTRUCTION_QUALITY"],
-                        "output_format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
-                    },
-                    "description": f"3D model generated from {len(approved_image_paths)} views of '{multi_view_info['prompt']}'",
-                    "model_file": download_result.get("model_path"),
-                    "point_cloud_file": download_result.get("point_cloud_path"),
-                    "previews": {},  # Will be generated later
-                    "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"],
-                    "remote_job_id": job_id
-                }
-                
-                # Create response
-                response = {
-                    "model_id": model_id,
+
+        if remote_result.get("status") == "success" and remote_result.get("local_path"):
+            openscad_result = create_import_scad(remote_result["local_path"], model_id)
+            models[model_id] = {
+                "id": model_id,
+                "type": "cuda_mvs_remote",
+                "parameters": {
                     "multi_view_id": multi_view_id,
-                    "status": "completed",
-                    "model_path": download_result.get("model_path"),
-                    "point_cloud_path": download_result.get("point_cloud_path"),
-                    "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
-                }
-            else:
-                # Store job information
-                remote_jobs[job_id] = {
-                    "model_id": model_id,
-                    "multi_view_id": multi_view_id,
-                    "server_id": server_id,
-                    "job_id": job_id,
-                    "status": status["status"],
-                    "message": status.get("message", "")
-                }
-                
-                # Create response
-                response = {
-                    "model_id": model_id,
-                    "multi_view_id": multi_view_id,
-                    "status": status["status"],
-                    "message": status.get("message", ""),
-                    "job_id": job_id
-                }
+                    "prompt": multi_view_info["prompt"],
+                    "num_views": len(approved_image_paths),
+                    "quality": REMOTE_CUDA_MVS["DEFAULT_RECONSTRUCTION_QUALITY"],
+                    "output_format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"],
+                },
+                "description": f"3D model generated from {len(approved_image_paths)} views of '{multi_view_info['prompt']}'",
+                "scad_file": openscad_result["scad_file"],
+                "model_file": remote_result.get("local_path"),
+                "point_cloud_file": None,
+                "previews": openscad_result["previews"],
+                "format": remote_result.get("format", REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]),
+                "remote_job_id": remote_result.get("job_id"),
+            }
+
+            response = {
+                "model_id": model_id,
+                "multi_view_id": multi_view_id,
+                "status": "completed",
+                "model_path": remote_result.get("local_path"),
+                "scad_file": openscad_result["scad_file"],
+                "point_cloud_path": None,
+                "format": remote_result.get("format", REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]),
+                "preview_url": f"/ui/preview/{model_id}",
+            }
         else:
-            # Store job information
+            job_id = remote_result.get("job_id")
+            if not job_id:
+                raise ValueError(remote_result.get("message", "Failed to process images remotely"))
+
             remote_jobs[job_id] = {
                 "model_id": model_id,
                 "multi_view_id": multi_view_id,
-                "server_id": server_id,
+                "server_id": remote_result.get("server_id", server_id),
                 "job_id": job_id,
-                "status": "processing"
+                "status": "processing",
+                "message": remote_result.get("message", ""),
             }
-            
-            # Create response
+
             response = {
                 "model_id": model_id,
                 "multi_view_id": multi_view_id,
                 "status": "processing",
                 "job_id": job_id,
-                "server_id": server_id
+                "server_id": remote_result.get("server_id", server_id),
             }
     else:
-        # Use local CUDA MVS processing
-        result = cuda_mvs.process_images(
-            approved_image_paths,
-            output_name=output_name,
-            quality=REMOTE_CUDA_MVS["DEFAULT_RECONSTRUCTION_QUALITY"],
-            output_format=REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
-        )
+        result = build_local_model_from_images(approved_image_paths, output_name)
+        openscad_result = create_import_scad(result["model_path"], model_id)
         
         # Store model information
         models[model_id] = {
@@ -1095,9 +890,10 @@ def create_3d_model_from_images(multi_view_id: str, output_name: Optional[str] =
                 "output_format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
             },
             "description": f"3D model generated from {len(approved_image_paths)} views of '{multi_view_info['prompt']}'",
+            "scad_file": openscad_result["scad_file"],
             "model_file": result.get("model_path"),
             "point_cloud_file": result.get("point_cloud_path"),
-            "previews": {},  # Will be generated later
+            "previews": openscad_result["previews"],
             "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
         }
         
@@ -1107,15 +903,17 @@ def create_3d_model_from_images(multi_view_id: str, output_name: Optional[str] =
             "multi_view_id": multi_view_id,
             "status": "completed",
             "model_path": result.get("model_path"),
+            "scad_file": openscad_result["scad_file"],
             "point_cloud_path": result.get("point_cloud_path"),
-            "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
+            "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"],
+            "preview_url": f"/ui/preview/{model_id}",
         }
     
     return response
 
 
 # Add complete pipeline tool (text to 3D model)
-@mcp_server.tool
+@register_tool
 def create_3d_model_from_text(prompt: str, num_views: int = 4, wait_for_completion: bool = True) -> Dict[str, Any]:
     """
     Create a 3D model from a text description using the complete pipeline.
@@ -1158,7 +956,7 @@ def create_3d_model_from_text(prompt: str, num_views: int = 4, wait_for_completi
 
 
 # Add remote CUDA MVS server discovery tool
-@mcp_server.tool
+@register_tool
 def discover_remote_cuda_mvs_servers() -> Dict[str, Any]:
     """
     Discover remote CUDA MVS servers on the network.
@@ -1181,7 +979,7 @@ def discover_remote_cuda_mvs_servers() -> Dict[str, Any]:
 
 
 # Add remote job status tool
-@mcp_server.tool
+@register_tool
 def get_remote_job_status(job_id: str) -> Dict[str, Any]:
     """
     Get the status of a remote CUDA MVS processing job.
@@ -1220,7 +1018,7 @@ def get_remote_job_status(job_id: str) -> Dict[str, Any]:
 
 
 # Add remote model download tool
-@mcp_server.tool
+@register_tool
 def download_remote_model_result(job_id: str) -> Dict[str, Any]:
     """
     Download a processed model from a remote CUDA MVS server.
@@ -1258,23 +1056,29 @@ def download_remote_model_result(job_id: str) -> Dict[str, Any]:
     job_info["model_path"] = result.get("model_path")
     job_info["point_cloud_path"] = result.get("point_cloud_path")
     job_info["downloaded"] = True
+    job_info["status"] = "completed"
     
     # Update model information if available
     if "model_id" in job_info and job_info["model_id"] in models:
         model_id = job_info["model_id"]
+        openscad_result = create_import_scad(result["model_path"], model_id)
+        models[model_id]["scad_file"] = openscad_result["scad_file"]
         models[model_id]["model_file"] = result.get("model_path")
         models[model_id]["point_cloud_file"] = result.get("point_cloud_path")
+        models[model_id]["previews"] = openscad_result["previews"]
     
     return {
         "job_id": job_id,
         "model_path": result.get("model_path"),
+        "scad_file": models[job_info["model_id"]].get("scad_file") if job_info.get("model_id") in models else None,
         "point_cloud_path": result.get("point_cloud_path"),
-        "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
+        "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"],
+        "preview_url": f"/ui/preview/{job_info['model_id']}" if job_info.get("model_id") in models else None,
     }
 
 
 # Add remote job cancellation tool
-@mcp_server.tool
+@register_tool
 def cancel_remote_job(job_id: str) -> Dict[str, Any]:
     """
     Cancel a remote CUDA MVS processing job.
@@ -1338,7 +1142,7 @@ async def handle_tool_call(request: Request) -> JSONResponse:
     
     # Check if tool exists
     tool_name = data["tool_name"]
-    if tool_name not in mcp_server.tools:
+    if tool_name not in tool_registry:
         raise HTTPException(status_code=404, detail=f"Tool {tool_name} not found")
     
     # Get tool parameters
@@ -1346,7 +1150,7 @@ async def handle_tool_call(request: Request) -> JSONResponse:
     
     # Call tool
     try:
-        result = mcp_server.tools[tool_name](**tool_params)
+        result = tool_registry[tool_name](**tool_params)
         return JSONResponse(content=result)
     except Exception as e:
         logger.error(f"Error calling tool {tool_name}: {str(e)}")
@@ -1378,7 +1182,7 @@ async def preview_model(request: Request, model_id: str) -> Response:
             "request": request,
             "model_id": model_id,
             "parameters": model_info["parameters"],
-            "previews": model_info["previews"]
+            "previews": {view: f"/preview/{view}/{model_id}" for view in model_info["previews"]}
         }
     )
 
@@ -1448,7 +1252,7 @@ async def root() -> Dict[str, Any]:
         "name": "OpenSCAD MCP Server",
         "version": "1.0.0",
         "description": "MCP server for OpenSCAD",
-        "tools": list(mcp_server.tools.keys())
+        "tools": list(tool_registry.keys())
     }
 
 # Run server

@@ -1,3 +1,10 @@
 py312/
 __pycache__/
 *.pyc
+.DS_Store
+.env
+output/
+scad/
+templates/
+static/
+testdir/
