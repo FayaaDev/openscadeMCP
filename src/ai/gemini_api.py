@@ -32,7 +32,7 @@ class GeminiImageGenerator:
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
     
-    def generate_image(self, prompt: str, model: str = "gemini-2.0-flash-exp-image-generation", 
+    def generate_image(self, prompt: str, model: str = "gemini-2.5-flash-image", 
                        output_path: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """
         Generate an image using Google Gemini API.
