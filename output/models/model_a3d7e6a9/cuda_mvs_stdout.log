@@ -1,0 +1,31 @@
+==================== configulations ====================
+input directory                  : /workspace/openscadeMCP/output/models/model_a3d7e6a9/cuda_mvs_input
+output directory                 : /workspace/openscadeMCP/output/models/model_a3d7e6a9/cuda_mvs_output
+PatchMatch method                : ACMH
+PatchMatch iterations            : 3
+maximum image size               : 800
+geometric consistency iterations : 2
+multi scale                      : Yes
+debug view                       : No
+normal level                     : 0
+number of threads                : 32
+========================================================
+
+[MVS INFO] processing image   1 /   4, reference view:   0 geometric consistency: 0
+[MVS INFO] processing image   2 /   4, reference view:   1 geometric consistency: 0
+[MVS INFO] processing image   3 /   4, reference view:   2 geometric consistency: 0
+[MVS INFO] processing image   4 /   4, reference view:   3 geometric consistency: 0
+[MVS INFO] processing image   1 /   4, reference view:   0 geometric consistency: 1
+[MVS INFO] processing image   2 /   4, reference view:   1 geometric consistency: 1
+[MVS INFO] processing image   3 /   4, reference view:   2 geometric consistency: 1
+[MVS INFO] processing image   4 /   4, reference view:   3 geometric consistency: 1
+[MVS INFO] processing image   1 /   4, reference view:   0 geometric consistency: 1
+[MVS INFO] processing image   2 /   4, reference view:   1 geometric consistency: 1
+[MVS INFO] processing image   3 /   4, reference view:   2 geometric consistency: 1
+[MVS INFO] processing image   4 /   4, reference view:   3 geometric consistency: 1
+[MVS INFO] processing image   1 /   4, reference view:   0
+[MVS INFO] processing image   2 /   4, reference view:   1
+[MVS INFO] processing image   3 /   4, reference view:   2
+[MVS INFO] processing image   4 /   4, reference view:   3
+number of initial points : [81 x 1]
+number of dense points   : [15 x 1]
