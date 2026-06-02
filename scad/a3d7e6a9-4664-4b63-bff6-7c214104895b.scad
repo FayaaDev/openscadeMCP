@@ -10,4 +10,4 @@ rotation_z = 0;
 translate([position_x, position_y, position_z])
 rotate([rotation_x, rotation_y, rotation_z])
 scale(scale_factor)
-import("/workspace/openscadeMCP/output/models/model_a3d7e6a9/model_a3d7e6a9.obj");
+import("/workspace/openscadeMCP/output/models/model_a3d7e6a9/model_a3d7e6a9.stl");
