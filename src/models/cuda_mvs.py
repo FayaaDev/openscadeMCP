@@ -355,9 +355,6 @@ class CUDAMultiViewStereo:
         Returns:
             Path to output OBJ file
         """
-        # In a real implementation, this would use a mesh reconstruction library
-        # such as Open3D or PyMeshLab to convert the point cloud to a mesh
-        
         if not output_dir:
             output_dir = os.path.dirname(ply_file)
         
@@ -365,21 +362,68 @@ class CUDAMultiViewStereo:
         obj_file = os.path.join(output_dir, f"{Path(ply_file).stem}.obj")
         
         logger.info(f"Converting PLY to OBJ: {ply_file} -> {obj_file}")
-        
-        # This is a placeholder for the actual conversion
-        # In a real implementation, you would use a library like Open3D:
-        # import open3d as o3d
-        # pcd = o3d.io.read_point_cloud(ply_file)
-        # mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd)[0]
-        # o3d.io.write_triangle_mesh(obj_file, mesh)
-        
-        # For now, we'll just create a dummy OBJ file
-        with open(obj_file, 'w') as f:
-            f.write(f"# Converted from {os.path.basename(ply_file)}\n")
-            f.write("# This is a placeholder OBJ file\n")
-            f.write("v 0 0 0\n")
-            f.write("v 1 0 0\n")
-            f.write("v 0 1 0\n")
-            f.write("f 1 2 3\n")
+
+        mesh = self._mesh_from_point_cloud(ply_file)
+
+        try:
+            import open3d as o3d
+
+            if not o3d.io.write_triangle_mesh(obj_file, mesh, write_vertex_normals=True):
+                raise RuntimeError(f"Failed to write OBJ file: {obj_file}")
+        except Exception as exc:
+            logger.error("Failed to write OBJ mesh: %s", exc)
+            raise
         
         return obj_file
+
+    def convert_ply_to_stl(self, ply_file: str, output_dir: Optional[str] = None) -> str:
+        """
+        Convert PLY point cloud to an STL mesh that OpenSCAD can import.
+        """
+        if not output_dir:
+            output_dir = os.path.dirname(ply_file)
+
+        stl_file = os.path.join(output_dir, f"{Path(ply_file).stem}.stl")
+
+        logger.info(f"Converting PLY to STL: {ply_file} -> {stl_file}")
+
+        mesh = self._mesh_from_point_cloud(ply_file)
+
+        try:
+            import open3d as o3d
+
+            if not o3d.io.write_triangle_mesh(stl_file, mesh, write_ascii=False):
+                raise RuntimeError(f"Failed to write STL file: {stl_file}")
+        except Exception as exc:
+            logger.error("Failed to write STL mesh: %s", exc)
+            raise
+
+        return stl_file
+
+    def _mesh_from_point_cloud(self, ply_file: str):
+        """
+        Build a watertight-ish mesh from a sparse reconstructed point cloud.
+        """
+        try:
+            import open3d as o3d
+
+            pcd = o3d.io.read_point_cloud(ply_file)
+            if not pcd.has_points():
+                raise ValueError(f"PLY point cloud contains no points: {ply_file}")
+
+            points = list(pcd.points)
+            if len(points) < 4:
+                raise ValueError(f"At least 4 points are required to create a mesh, found {len(points)}")
+
+            if len(points) >= 20:
+                pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=min(20, len(points) - 1), std_ratio=2.5)
+
+            mesh, _ = pcd.compute_convex_hull()
+            mesh.compute_vertex_normals()
+            if not mesh.has_triangles():
+                raise ValueError(f"Could not create mesh triangles from point cloud: {ply_file}")
+
+            return mesh
+        except Exception as exc:
+            logger.error("Failed to create mesh from PLY point cloud: %s", exc)
+            raise

@@ -192,12 +192,13 @@ def build_local_model_from_images(image_paths: List[str], output_name: str) -> D
     point_cloud_path = result.get("point_cloud_file")
     model_path = point_cloud_path
 
-    if point_cloud_path and REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"] == "obj":
-        model_path = local_cuda_mvs.convert_ply_to_obj(point_cloud_path)
+    if point_cloud_path:
+        model_path = local_cuda_mvs.convert_ply_to_stl(point_cloud_path)
 
     return {
         "model_path": model_path,
         "point_cloud_path": point_cloud_path,
+        "format": os.path.splitext(model_path)[1].lstrip(".") if model_path else None,
     }
 
 
@@ -907,14 +908,14 @@ def create_3d_model_from_images(multi_view_id: str, output_name: Optional[str] =
                 "prompt": multi_view_info["prompt"],
                 "num_views": len(approved_image_paths),
                 "quality": REMOTE_CUDA_MVS["DEFAULT_RECONSTRUCTION_QUALITY"],
-                "output_format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
+                "output_format": result.get("format")
             },
             "description": f"3D model generated from {len(approved_image_paths)} views of '{multi_view_info['prompt']}'",
             "scad_file": openscad_result["scad_file"],
             "model_file": result.get("model_path"),
             "point_cloud_file": result.get("point_cloud_path"),
             "previews": openscad_result["previews"],
-            "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"]
+            "format": result.get("format")
         }
         
         # Create response
@@ -925,7 +926,7 @@ def create_3d_model_from_images(multi_view_id: str, output_name: Optional[str] =
             "model_path": result.get("model_path"),
             "scad_file": openscad_result["scad_file"],
             "point_cloud_path": result.get("point_cloud_path"),
-            "format": REMOTE_CUDA_MVS["DEFAULT_OUTPUT_FORMAT"],
+            "format": result.get("format"),
             "preview_url": f"/ui/preview/{model_id}",
         }
     
