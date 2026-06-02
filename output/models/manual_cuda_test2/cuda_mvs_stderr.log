@@ -1,3 +1,0 @@
-terminate called after throwing an instance of 'cv::Exception'
-  what():  OpenCV(4.5.4) ./modules/core/include/opencv2/core/private.cuda.hpp:106: error: (-216:No CUDA support) The library is compiled without CUDA support in function 'throw_no_cuda'
-

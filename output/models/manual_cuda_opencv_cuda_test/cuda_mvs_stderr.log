@@ -1,3 +1,0 @@
-terminate called after throwing an instance of 'cv::Exception'
-  what():  OpenCV(4.10.0) /workspace/opencv/modules/core/src/matrix.cpp:1177: error: (-211:One of the arguments' values is out of range) Bad new number of rows in function 'reshape'
-
