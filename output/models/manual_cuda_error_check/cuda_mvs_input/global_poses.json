@@ -1,0 +1,129 @@
+{
+  "num_global_poses": 4,
+  "global_poses": [
+    {
+      "id": 0,
+      "R": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "t": {
+        "type_id": "opencv-matrix",
+        "rows": 1,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          0.0,
+          0.25,
+          2.5
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "R": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "t": {
+        "type_id": "opencv-matrix",
+        "rows": 1,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          2.5,
+          0.25,
+          1.5308084989341916e-16
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "R": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "t": {
+        "type_id": "opencv-matrix",
+        "rows": 1,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          3.061616997868383e-16,
+          0.25,
+          -2.5
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "R": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      },
+      "t": {
+        "type_id": "opencv-matrix",
+        "rows": 1,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          -2.5,
+          0.25,
+          -4.592425496802574e-16
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+==================== configulations ====================
+input directory                  : /workspace/openscadeMCP/output/models/manual_cuda_test2/cuda_mvs_input
+output directory                 : /workspace/openscadeMCP/output/models/manual_cuda_test2/cuda_mvs_output
+PatchMatch method                : ACMH
+PatchMatch iterations            : 3
+maximum image size               : 800
+geometric consistency iterations : 2
+multi scale                      : Yes
+debug view                       : No
+normal level                     : 0
+number of threads                : 32
+========================================================
+

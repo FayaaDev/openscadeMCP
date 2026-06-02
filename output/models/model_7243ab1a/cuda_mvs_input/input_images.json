@@ -1,0 +1,89 @@
+{
+  "num_images": 4,
+  "input_images": [
+    {
+      "id": 0,
+      "filename": "/workspace/openscadeMCP/output/models/model_7243ab1a/cuda_mvs_input/images/view_1.png",
+      "K": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1024.0,
+          0.0,
+          512.0,
+          0.0,
+          1024.0,
+          512.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "filename": "/workspace/openscadeMCP/output/models/model_7243ab1a/cuda_mvs_input/images/view_2.png",
+      "K": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1024.0,
+          0.0,
+          512.0,
+          0.0,
+          1024.0,
+          512.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "filename": "/workspace/openscadeMCP/output/models/model_7243ab1a/cuda_mvs_input/images/view_3.png",
+      "K": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1024.0,
+          0.0,
+          512.0,
+          0.0,
+          1024.0,
+          512.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "filename": "/workspace/openscadeMCP/output/models/model_7243ab1a/cuda_mvs_input/images/view_4.png",
+      "K": {
+        "type_id": "opencv-matrix",
+        "rows": 3,
+        "cols": 3,
+        "dt": "d",
+        "data": [
+          1024.0,
+          0.0,
+          512.0,
+          0.0,
+          1024.0,
+          512.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      }
+    }
+  ]
+}
